@@ -1,0 +1,40 @@
+{
+  "schemaVersion": "2.0.0",
+  "acapPackageConf": {
+    "setup": {
+      "friendlyName": "Astral DOOHOPS WebM service",
+      "appName": "astralwebm",
+      "vendor": "YC7511",
+      "vendorId": "1234567890",
+      "vendorUrl": "https://github.com/YC7511",
+      "version": "1.0.0",
+      "architecture": "aarch64",
+      "runMode": "respawn",
+      "user": {
+        "username": "sdk",
+        "group": "sdk"
+      },
+      "compatibleOsVersions": [
+        {
+          "max": "13"
+        }
+      ]
+    },
+    "installation": {
+      "postInstallScript": "postinstall.sh"
+    },
+    "configuration": {
+      "httpConfig": [
+        {
+          "access": "viewer",
+          "type": "directory"
+        },
+        {
+          "access": "viewer",
+          "name": "astralwebm.cgi",
+          "type": "fastCgi"
+        }
+      ]
+    }
+  }
+}
