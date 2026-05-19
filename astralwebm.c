@@ -218,7 +218,7 @@ static bool parse_positive_int(const char *query, const char *key, int *value_ou
 
     errno = 0;
     val = strtol(buf, &end, 10);
-    if (errno != 0 || end == buf || *end != '\0' || val <= 0 || val > INT32_MAX) {
+    if (errno != 0 || end == buf || *end != '\0' || val <= 0 || val > INT_MAX) {
         return false;
     }
 
@@ -371,7 +371,7 @@ static bool load_html_page(char **content_out, size_t *size_out) {
             continue;
         }
         sz = ftell(f);
-        if (sz <= 0) {
+        if (sz <= 0 || (size_t)sz >= SIZE_MAX) {
             fclose(f);
             continue;
         }
