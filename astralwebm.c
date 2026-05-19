@@ -371,7 +371,7 @@ static bool load_html_page(char **content_out, size_t *size_out) {
             continue;
         }
         sz = ftell(f);
-        if (sz <= 0 || (size_t)sz >= SIZE_MAX) {
+        if (sz <= 0 || (unsigned long long)sz > (unsigned long long)(SIZE_MAX - 1U)) {
             fclose(f);
             continue;
         }
@@ -443,11 +443,10 @@ static void handle_session_start(FCGX_Request *request) {
             return;
         }
     }
-    if (parse_positive_int(query, "timeout", &timeout_sec)) {
-        timeout_sec = clamp_timeout(timeout_sec);
-    } else {
+    if (!parse_positive_int(query, "timeout", &timeout_sec)) {
         timeout_sec = DEFAULT_TIMEOUT_SEC;
     }
+    timeout_sec = clamp_timeout(timeout_sec);
 
     if (create_session(camera, fps, timeout_sec, token) < 0) {
         send_plain(request->out, 429, "Too Many Requests", "maximum concurrent streams reached");
