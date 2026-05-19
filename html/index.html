@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>astralwebm</title>
+  <style>
+    body { font-family: sans-serif; background: #111; color: #eee; margin: 0; padding: 16px; }
+    .wrap { max-width: 960px; margin: 0 auto; }
+    video { width: 100%; background: #000; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 12px 0; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>astralwebm</h1>
+    <p>On-demand WebM stream. Press Play to request a short-lived token first.</p>
+    <div class="row">
+      <label>Camera <input id="camera" type="number" min="1" value="1"></label>
+      <label>FPS
+        <select id="fps">
+          <option value="1" selected>1</option>
+          <option value="5">5</option>
+          <option value="10">10</option>
+        </select>
+      </label>
+      <button id="play">Play</button>
+      <button id="stop">Stop</button>
+    </div>
+    <video id="player" controls playsinline></video>
+    <pre id="status"></pre>
+  </div>
+  <script>
+    const player = document.getElementById('player');
+    const statusEl = document.getElementById('status');
+
+    document.getElementById('play').addEventListener('click', async () => {
+      const camera = parseInt(document.getElementById('camera').value || '1', 10) || 1;
+      const fps = document.getElementById('fps').value;
+      statusEl.textContent = 'Requesting session...';
+
+      try {
+        const res = await fetch(`session/start?camera=${camera}&fps=${fps}`, { method: 'POST' });
+        if (!res.ok) {
+          statusEl.textContent = `Session start failed: ${await res.text()}`;
+          return;
+        }
+        const payload = await res.json();
+        player.src = payload.streamUrl;
+        statusEl.textContent = 'Streaming...';
+        await player.play();
+      } catch (err) {
+        statusEl.textContent = `Error: ${err.message}`;
+      }
+    });
+
+    document.getElementById('stop').addEventListener('click', () => {
+      player.pause();
+      player.removeAttribute('src');
+      player.load();
+      statusEl.textContent = 'Stopped';
+    });
+  </script>
+</body>
+</html>
