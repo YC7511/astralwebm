@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <signal.h>
@@ -85,11 +86,16 @@ static int FCGX_FFlush(FCGX_Stream *stream) { return fflush(stream); }
 #define TOKEN_HEX_LEN (TOKEN_BYTES * 2)
 
 #define DEFAULT_CAMERA 1
+#define MAX_CAMERA 99
 #define DEFAULT_WIDTH 800
 #define DEFAULT_FPS 1
 #define DEFAULT_TIMEOUT_SEC 120
 #define MAX_TIMEOUT_SEC 300
 #define TOKEN_TTL_SEC 30
+
+#define BITRATE_1FPS_KBPS 180
+#define BITRATE_5FPS_KBPS 450
+#define BITRATE_10FPS_KBPS 900
 
 typedef struct {
     bool in_use;
@@ -108,6 +114,7 @@ typedef struct {
 static stream_session_t g_sessions[MAX_SESSIONS];
 static pthread_mutex_t g_sessions_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* Keep this fallback in sync with html/index.html. */
 static const char *g_embedded_html =
     "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
     "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
@@ -138,13 +145,13 @@ static const char *g_embedded_html =
 static int bitrate_for_fps(int fps) {
     switch (fps) {
         case 1:
-            return 180;
+            return BITRATE_1FPS_KBPS;
         case 5:
-            return 450;
+            return BITRATE_5FPS_KBPS;
         case 10:
-            return 900;
+            return BITRATE_10FPS_KBPS;
         default:
-            return 180;
+            return BITRATE_1FPS_KBPS;
     }
 }
 
@@ -425,15 +432,16 @@ static void handle_session_start(FCGX_Request *request) {
             send_plain(request->out, 400, "Bad Request", "camera must be a positive integer");
             return;
         }
+        if (camera > MAX_CAMERA) {
+            send_plain(request->out, 400, "Bad Request", "camera must be between 1 and 99");
+            return;
+        }
     }
     if (query_param_value(query, "fps", param_buf, sizeof(param_buf))) {
-        char *end = NULL;
-        long raw_fps = strtol(param_buf, &end, 10);
-        if (end == param_buf || *end != '\0' || raw_fps > INT32_MAX || raw_fps <= 0 || !is_allowed_fps((int)raw_fps)) {
+        if (!parse_positive_int(query, "fps", &fps) || !is_allowed_fps(fps)) {
             send_plain(request->out, 400, "Bad Request", "fps must be one of: 1, 5, 10");
             return;
         }
-        fps = (int)raw_fps;
     }
     if (parse_positive_int(query, "timeout", &timeout_sec)) {
         timeout_sec = clamp_timeout(timeout_sec);
@@ -527,16 +535,15 @@ static void stop_transcoder_process(pid_t pid, int stdout_fd) {
     }
 }
 
-static int stream_from_transcoder(FCGX_Request *request, const stream_session_t *session) {
+static void stream_from_transcoder(FCGX_Request *request, const stream_session_t *session) {
     int transcoder_fd = -1;
     pid_t transcoder_pid = -1;
     time_t start = time(NULL);
-    bool timeout_reached = false;
     unsigned char buffer[8192];
 
     if (start_transcoder_process(session, &transcoder_fd, &transcoder_pid) != 0) {
         send_plain(request->out, 502, "Bad Gateway", "Unable to start transcoder");
-        return -1;
+        return;
     }
 
     write_headers(request->out, 200, "OK", "video/webm");
@@ -547,7 +554,6 @@ static int stream_from_transcoder(FCGX_Request *request, const stream_session_t 
         ssize_t nread;
 
         if (difftime(time(NULL), start) >= session->timeout_sec) {
-            timeout_reached = true;
             break;
         }
 
@@ -565,6 +571,9 @@ static int stream_from_transcoder(FCGX_Request *request, const stream_session_t 
 
         nread = read(transcoder_fd, buffer, sizeof(buffer));
         if (nread > 0) {
+            if (nread > INT_MAX) {
+                break;
+            }
             if (FCGX_PutStr((const char *)buffer, (int)nread, request->out) < 0 || FCGX_FFlush(request->out) < 0) {
                 break;
             }
@@ -574,7 +583,6 @@ static int stream_from_transcoder(FCGX_Request *request, const stream_session_t 
     }
 
     stop_transcoder_process(transcoder_pid, transcoder_fd);
-    return timeout_reached ? 0 : 1;
 }
 
 static void handle_stream_webm(FCGX_Request *request) {
@@ -596,7 +604,7 @@ static void handle_stream_webm(FCGX_Request *request) {
     }
 
     /* TODO: Replace ffmpeg shell-out with a native transcoder path if/when dependencies are available. */
-    (void)stream_from_transcoder(request, &session);
+    stream_from_transcoder(request, &session);
     release_session(slot);
 }
 
