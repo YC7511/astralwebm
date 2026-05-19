@@ -571,9 +571,6 @@ static void stream_from_transcoder(FCGX_Request *request, const stream_session_t
 
         nread = read(transcoder_fd, buffer, sizeof(buffer));
         if (nread > 0) {
-            if (nread > INT_MAX) {
-                break;
-            }
             if (FCGX_PutStr((const char *)buffer, (int)nread, request->out) < 0 || FCGX_FFlush(request->out) < 0) {
                 break;
             }
@@ -603,7 +600,7 @@ static void handle_stream_webm(FCGX_Request *request) {
         return;
     }
 
-    /* TODO: Replace ffmpeg shell-out with a native transcoder path if/when dependencies are available. */
+    /* TODO: Replace ffmpeg subprocess invocation with a native transcoder path if/when dependencies are available. */
     stream_from_transcoder(request, &session);
     release_session(slot);
 }
