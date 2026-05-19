@@ -135,7 +135,7 @@ static const char *g_embedded_html =
     "const cam=parseInt(document.getElementById('camera').value||'1',10)||1;"
     "const fps=document.getElementById('fps').value;"
     "s.textContent='Requesting session...';"
-    "try{const r=await fetch(`session/start?camera=${cam}&fps=${fps}`,{method:'POST'});"
+    "try{const r=await fetch(`/local/" APP_NAME "/session/start?camera=${cam}&fps=${fps}`,{method:'POST'});"
     "if(!r.ok){s.textContent='Session start failed: '+(await r.text());return;}"
     "const j=await r.json();p.src=j.streamUrl;s.textContent='Streaming...';await p.play();"
     "}catch(e){s.textContent='Error: '+e.message;}});"
@@ -604,8 +604,32 @@ static void handle_stream_webm(FCGX_Request *request) {
     release_session(slot);
 }
 
-static void handle_request(FCGX_Request *request) {
+static const char *resolve_route(FCGX_Request *request) {
     const char *path = FCGX_GetParam("PATH_INFO", request->envp);
+    const char *uri = FCGX_GetParam("REQUEST_URI", request->envp);
+
+    if (path && path[0] != '\0' && strcmp(path, "/") != 0) {
+        return path;
+    }
+
+    if (uri && uri[0] != '\0') {
+        if (strstr(uri, "/session/start") != NULL) {
+            return "/session/start";
+        }
+        if (strstr(uri, "/stream.webm") != NULL) {
+            return "/stream.webm";
+        }
+        if (strstr(uri, "/local/" APP_NAME "/") != NULL || strstr(uri, "/local/" APP_NAME) != NULL) {
+            return "/";
+        }
+    }
+
+    return "/";
+}
+
+static void handle_request(FCGX_Request *request) {
+    const char *path = resolve_route(request);
+
     if (!path || path[0] == '\0' || strcmp(path, "/") == 0) {
         handle_index(request);
         return;
