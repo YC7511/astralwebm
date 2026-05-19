@@ -3,12 +3,17 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <time.h>
+#include <unistd.h>
 
 #if !defined(ASTRALWEBM_NO_FCGI) && defined(__has_include)
 #if __has_include(<fcgiapp.h>)
@@ -219,18 +224,14 @@ static int generate_token(char out[TOKEN_HEX_LEN + 1]) {
     FILE *f = fopen("/dev/urandom", "rb");
     size_t i;
 
-    if (f) {
-        size_t n = fread(raw, 1, sizeof(raw), f);
-        fclose(f);
-        if (n != sizeof(raw)) {
-            return -1;
-        }
-    } else {
-        srand((unsigned int)(time(NULL) ^ (uintptr_t)&out));
-        for (i = 0; i < sizeof(raw); ++i) {
-            raw[i] = (uint8_t)(rand() & 0xFF);
-        }
+    if (!f) {
+        return -1;
     }
+    if (fread(raw, 1, sizeof(raw), f) != sizeof(raw)) {
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
 
     for (i = 0; i < sizeof(raw); ++i) {
         (void)snprintf(out + (i * 2), 3, "%02x", raw[i]);
@@ -411,21 +412,24 @@ static void handle_session_start(FCGX_Request *request) {
     int camera = DEFAULT_CAMERA;
     int fps = DEFAULT_FPS;
     int timeout_sec = DEFAULT_TIMEOUT_SEC;
+    char param_buf[32];
     char token[TOKEN_HEX_LEN + 1];
-    int slot;
 
     if (method && strcmp(method, "POST") != 0 && strcmp(method, "GET") != 0) {
         send_plain(request->out, 405, "Method Not Allowed", "Use POST /session/start");
         return;
     }
 
-    if (parse_positive_int(query, "camera", &camera) && camera <= 0) {
-        camera = DEFAULT_CAMERA;
+    if (query_param_value(query, "camera", param_buf, sizeof(param_buf))) {
+        if (!parse_positive_int(query, "camera", &camera)) {
+            send_plain(request->out, 400, "Bad Request", "camera must be a positive integer");
+            return;
+        }
     }
-    if (query_param_value(query, "fps", token, sizeof(token))) {
+    if (query_param_value(query, "fps", param_buf, sizeof(param_buf))) {
         char *end = NULL;
-        long raw_fps = strtol(token, &end, 10);
-        if (end == token || *end != '\0' || raw_fps > INT32_MAX || raw_fps <= 0 || !is_allowed_fps((int)raw_fps)) {
+        long raw_fps = strtol(param_buf, &end, 10);
+        if (end == param_buf || *end != '\0' || raw_fps > INT32_MAX || raw_fps <= 0 || !is_allowed_fps((int)raw_fps)) {
             send_plain(request->out, 400, "Bad Request", "fps must be one of: 1, 5, 10");
             return;
         }
@@ -437,8 +441,7 @@ static void handle_session_start(FCGX_Request *request) {
         timeout_sec = DEFAULT_TIMEOUT_SEC;
     }
 
-    slot = create_session(camera, fps, timeout_sec, token);
-    if (slot < 0) {
+    if (create_session(camera, fps, timeout_sec, token) < 0) {
         send_plain(request->out, 429, "Too Many Requests", "maximum concurrent streams reached");
         return;
     }
@@ -450,60 +453,127 @@ static void handle_session_start(FCGX_Request *request) {
         token,
         APP_NAME,
         token);
-    (void)slot;
 }
 
-static int stream_from_transcoder(FCGX_Request *request, const stream_session_t *session) {
-    char command[1024];
+static int start_transcoder_process(const stream_session_t *session, int *stdout_fd_out, pid_t *pid_out) {
     char rtsp_url[256];
-    FILE *transcoder;
-    time_t start = time(NULL);
-    bool timeout_reached = false;
-    unsigned char buffer[4096];
+    char vf_arg[64];
+    char bitrate_arg[32];
+    int pipefd[2];
+    pid_t pid;
 
     snprintf(rtsp_url,
              sizeof(rtsp_url),
              "rtsp://127.0.0.1/axis-media/media.amp?camera=%d&videocodec=h264&audio=0",
              session->camera);
+    snprintf(vf_arg, sizeof(vf_arg), "scale=%d:-2,fps=%d", session->width, session->fps);
+    snprintf(bitrate_arg, sizeof(bitrate_arg), "%dk", session->bitrate_kbps);
 
-    snprintf(command,
-             sizeof(command),
-             "ffmpeg -loglevel error -rtsp_transport tcp -i '%s' -an "
-             "-vf scale=%d:-2,fps=%d -c:v libvpx -deadline realtime -cpu-used 8 -b:v %dk -f webm -",
-             rtsp_url,
-             session->width,
-             session->fps,
-             session->bitrate_kbps);
+    if (pipe(pipefd) != 0) {
+        return -1;
+    }
 
-    transcoder = popen(command, "r");
-    if (!transcoder) {
+    pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -1;
+    }
+
+    if (pid == 0) {
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[0]);
+        close(pipefd[1]);
+        execlp("ffmpeg",
+               "ffmpeg",
+               "-loglevel",
+               "error",
+               "-rtsp_transport",
+               "tcp",
+               "-i",
+               rtsp_url,
+               "-an",
+               "-vf",
+               vf_arg,
+               "-c:v",
+               "libvpx",
+               "-deadline",
+               "realtime",
+               "-cpu-used",
+               "8",
+               "-b:v",
+               bitrate_arg,
+               "-f",
+               "webm",
+               "-",
+               (char *)NULL);
+        _exit(127);
+    }
+
+    close(pipefd[1]);
+    *stdout_fd_out = pipefd[0];
+    *pid_out = pid;
+    return 0;
+}
+
+static void stop_transcoder_process(pid_t pid, int stdout_fd) {
+    int status = 0;
+    if (stdout_fd >= 0) {
+        close(stdout_fd);
+    }
+    if (pid > 0) {
+        kill(pid, SIGTERM);
+        waitpid(pid, &status, 0);
+    }
+}
+
+static int stream_from_transcoder(FCGX_Request *request, const stream_session_t *session) {
+    int transcoder_fd = -1;
+    pid_t transcoder_pid = -1;
+    time_t start = time(NULL);
+    bool timeout_reached = false;
+    unsigned char buffer[8192];
+
+    if (start_transcoder_process(session, &transcoder_fd, &transcoder_pid) != 0) {
         send_plain(request->out, 502, "Bad Gateway", "Unable to start transcoder");
         return -1;
     }
 
     write_headers(request->out, 200, "OK", "video/webm");
     while (true) {
-        size_t nread;
+        fd_set rfds;
+        struct timeval tv;
+        int ready;
+        ssize_t nread;
 
         if (difftime(time(NULL), start) >= session->timeout_sec) {
             timeout_reached = true;
             break;
         }
 
-        nread = fread(buffer, 1, sizeof(buffer), transcoder);
+        FD_ZERO(&rfds);
+        FD_SET(transcoder_fd, &rfds);
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        ready = select(transcoder_fd + 1, &rfds, NULL, NULL, &tv);
+        if (ready < 0) {
+            break;
+        }
+        if (ready == 0) {
+            continue;
+        }
+
+        nread = read(transcoder_fd, buffer, sizeof(buffer));
         if (nread > 0) {
             if (FCGX_PutStr((const char *)buffer, (int)nread, request->out) < 0 || FCGX_FFlush(request->out) < 0) {
                 break;
             }
+            continue;
         }
-        if (nread < sizeof(buffer)) {
-            if (feof(transcoder) || ferror(transcoder)) {
-                break;
-            }
-        }
+        break;
     }
 
-    pclose(transcoder);
+    stop_transcoder_process(transcoder_pid, transcoder_fd);
     return timeout_reached ? 0 : 1;
 }
 
